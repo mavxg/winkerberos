@@ -679,8 +679,18 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
     Py_END_ALLOW_THREADS
     if (status == SEC_I_COMPLETE_NEEDED || status == SEC_I_COMPLETE_AND_CONTINUE)  {
         status = CompleteAuthToken(&state->ctx, &outbuf);
+        state->haveCtx = 1;
+    } else if (status == SEC_I_CONTINUE_NEEDED) {
+        state->haveCtx = 1;
+        status = AUTH_GSS_CONTINUE;
+    } else if (status == SEC_E_OK) {
+        state->haveCtx = 1;
+    } else {
+        set_gsserror(status, "AcceptSecurityContext");
+        status = AUTH_GSS_ERROR;
+        goto done;
     }
-    state->haveCtx = 1; //TODO: this is not true -- can probably use ctx_attr to figure out if we should free
+
     if (outBufs[0].cbBuffer) {
         state->response = base64_encode(outBufs[0].pvBuffer,
                                         outBufs[0].cbBuffer);
@@ -719,8 +729,6 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
         FreeContextBuffer(native_names.sServerName);
         status = AUTH_GSS_COMPLETE;
         state->authenticated = TRUE;
-    } else {
-        status = AUTH_GSS_CONTINUE;
     }
 done:
     if (inBufs[0].pvBuffer) {
