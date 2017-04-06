@@ -1,5 +1,6 @@
 /*
  * Copyright 2016 MongoDB, Inc.
+ * Copyright 2017 Benjamin Norrington.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -537,3 +538,196 @@ auth_sspi_client_wrap(sspi_client_state* state,
     return status;
 }
 
+
+VOID
+destroy_sspi_server_state(sspi_server_state* state) {
+    if (state->haveCtx) {
+        DeleteSecurityContext(&state->ctx);
+        state->haveCtx = 0;
+    }
+    if (state->haveCred) {
+        FreeCredentialsHandle(&state->cred);
+        state->haveCred = 0;
+    }
+    if (state->spn != NULL) {
+        free(state->spn);
+        state->spn = NULL;
+    }
+    if (state->response != NULL) {
+        free(state->response);
+        state->response = NULL;
+    }
+    if (state->username != NULL) {
+        free(state->username);
+        state->username = NULL;
+    }
+    if (state->targetname != NULL) {
+        free(state->targetname);
+        state->targetname = NULL;
+    }
+}
+
+INT
+auth_sspi_server_init(WCHAR* service, sspi_server_state* state) {
+    WCHAR *mechoid = GSS_MECH_OID_KRB5;
+    SECURITY_STATUS status;
+
+    state->response = NULL;
+    state->username = NULL;
+    state->targetname = NULL;
+    state->flags = ASC_REQ_INTEGRITY |
+                   ASC_REQ_SEQUENCE_DETECT |
+                   ASC_REQ_REPLAY_DETECT |
+                   ASC_REQ_CONFIDENTIALITY;
+    state->haveCred = 0;
+    state->haveCtx = 0;
+    state->ctx_attr = 0;
+    state->spn = _wcsdup(service);
+    state->authenticated = FALSE;
+    if (state->spn == NULL) {
+        PyErr_SetNone(PyExc_MemoryError);
+        return AUTH_GSS_ERROR;
+    }
+    /* Convert RFC-2078 format to SPN */
+    if (!wcschr(state->spn, L'/')) {
+        WCHAR* ptr = wcschr(state->spn, L'@');
+        if (ptr) {
+            *ptr = L'/';
+        }
+    }
+
+    status = AcquireCredentialsHandleW(/* Principal */
+                                       state->spn,
+                                       /* Security package name */
+                                       mechoid,
+                                       /* Credentials Use */
+                                       SECPKG_CRED_INBOUND,
+                                       /* LogonID (We don't use this) */
+                                       NULL,
+                                       /* AuthData */
+                                       NULL,
+                                       /* pGetKeyFn = Always NULL */
+                                       NULL,
+                                       /* pvGetKeyArgument = Always NULL */
+                                       NULL,
+                                       /* CredHandle */
+                                       &state->cred,
+                                       /* Expiry  */
+                                       &state->cred_expiry);
+    if (status != SEC_E_OK) {
+        set_gsserror(status, "AcquireCredentialsHandle");
+        return AUTH_GSS_ERROR;
+    }
+    state->haveCred = 1;
+    return AUTH_GSS_COMPLETE;
+}
+
+INT
+auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
+    SecBufferDesc inbuf;
+    SecBuffer inBufs[1];
+    SecBufferDesc outbuf;
+    SecBuffer outBufs[1];
+    SECURITY_STATUS status = AUTH_GSS_CONTINUE;
+    DWORD len;
+
+    if (state->response != NULL) {
+        free(state->response);
+        state->response = NULL;
+    }
+
+    inbuf.ulVersion = SECBUFFER_VERSION;
+    inbuf.cBuffers = 1;
+    inbuf.pBuffers = inBufs;
+    inBufs[0].pvBuffer = NULL;
+    inBufs[0].cbBuffer = 0;
+    inBufs[0].BufferType = SECBUFFER_TOKEN;
+    if (state->haveCtx) {
+        inBufs[0].pvBuffer = base64_decode(challenge, &len);
+        if (!inBufs[0].pvBuffer) {
+            return AUTH_GSS_ERROR;
+        }
+        inBufs[0].cbBuffer = len;
+    }
+
+    outbuf.ulVersion = SECBUFFER_VERSION;
+    outbuf.cBuffers = 1;
+    outbuf.pBuffers = outBufs;
+    outBufs[0].pvBuffer = NULL;
+    outBufs[0].cbBuffer = 0;
+    outBufs[0].BufferType = SECBUFFER_TOKEN;
+
+    Py_BEGIN_ALLOW_THREADS
+    status = AcceptSecurityContext(/* CredHandle */
+                                   &state->cred,
+                                   /* CtxtInHandle (NULL on first call) */
+                                   state->haveCtx ? &state->ctx : NULL,
+                                   /* Challenge  */
+                                   &inbuf, //pInput
+                                   /* Flags */
+                                   ASC_REQ_ALLOCATE_MEMORY | state->flags,
+                                   /* Target data representation TargetDataRep*/
+                                   SECURITY_NETWORK_DREP,
+                                   /* CtxtHandle (Set on first call) */
+                                   &state->ctx,
+                                   /* Output */
+                                   &outbuf,
+                                   /* Context attributes */
+                                   &state->ctx_attr, 
+                                   /* Expiry */
+                                   &state->ctx_expiry);
+    Py_END_ALLOW_THREADS
+    if (status == SEC_I_COMPLETE_NEEDED || status == SEC_I_COMPLETE_AND_CONTINUE)  {
+        status = CompleteAuthToken(&state->ctx, &outbuf);
+    }
+    state->haveCtx = 1; //TODO: this is not true -- can probably use ctx_attr to figure out if we should free
+    if (outBufs[0].cbBuffer) {
+        state->response = base64_encode(outBufs[0].pvBuffer,
+                                        outBufs[0].cbBuffer);
+        if (!state->response) {
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+    }
+    if (status == SEC_E_OK) {
+        SecPkgContext_NativeNamesW native_names;
+        /* Get authenticated username. */
+        SecPkgContext_NamesW names;
+        status = QueryContextAttributesW(
+            &state->ctx, SECPKG_ATTR_NAMES, &names);
+        if (status != SEC_E_OK) {
+            set_gsserror(status, "QueryContextAttributesW");
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+        state->username = wide_to_utf8(names.sUserName);
+        FreeContextBuffer(names.sUserName);
+        if (state->username == NULL) {
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+        /* Get server target name */
+        status = QueryContextAttributesW(
+            &state->ctx, SECPKG_ATTR_NATIVE_NAMES, &native_names);
+        if (status != SEC_E_OK) {
+            set_gsserror(status, "QueryContextAttributesW");
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+        state->targetname = wide_to_utf8(native_names.sServerName);
+        FreeContextBuffer(native_names.sClientName);
+        FreeContextBuffer(native_names.sServerName);
+        status = AUTH_GSS_COMPLETE;
+        state->authenticated = TRUE;
+    } else {
+        status = AUTH_GSS_CONTINUE;
+    }
+done:
+    if (inBufs[0].pvBuffer) {
+        free(inBufs[0].pvBuffer);
+    }
+    if (outBufs[0].pvBuffer) {
+        FreeContextBuffer(outBufs[0].pvBuffer);
+    }
+    return status;
+}

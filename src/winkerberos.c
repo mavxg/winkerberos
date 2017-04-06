@@ -1,5 +1,6 @@
 /*
  * Copyright 2016 MongoDB, Inc.
+ * Copyright 2017 Benjamin Norrington.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -691,6 +692,254 @@ sspi_client_wrap(PyObject* self, PyObject* args) {
     return Py_BuildValue("i", result);
 }
 
+
+/* Server Methods */
+
+static VOID
+#if PY_MAJOR_VERSION >=3
+destroy_sspi_server(PyObject* obj) {
+    sspi_server_state* state = PyCapsule_GetPointer(obj, NULL);
+#else
+destroy_sspi_server(VOID* obj) {
+    sspi_server_state* state = (sspi_server_state*)obj;
+#endif
+    if (state) {
+        destroy_sspi_server_state(state);
+        free(state);
+    }
+}
+
+PyDoc_STRVAR(sspi_server_init_doc,
+"authGSSServerInit(service)\n"
+"\n"
+"Initializes a context for Kerberos SSPI server side authentication.\n"
+"the given service principal.\n"
+
+"\n"
+":Parameters:\n"
+"  - `service`: A string containing the service principal in RFC-2078 format\n"
+"    (``service@hostname``) or SPN format (``service/hostname`` or\n"
+"    ``service/hostname@REALM``).\n"
+"\n"
+":Returns: A tuple of (result, context) where result is\n"
+"          :data:`AUTH_GSS_COMPLETE` and context is an opaque value passed\n"
+"          in subsequent function calls.\n");
+
+static PyObject*
+sspi_server_init(PyObject* self, PyObject* args, PyObject* kw) {
+    sspi_server_state* state;
+    PyObject* pyctx = NULL;
+    PyObject* serviceobj;
+    WCHAR *service = NULL;
+    Py_ssize_t slen = 0;
+    PyObject* resultobj = NULL;
+    INT result = 0;
+    static SEC_CHAR* keywords[] = {
+        "service", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args,
+                                     kw,
+                                     "O|OlOOOO",
+                                     keywords,
+                                     &serviceobj)) {
+        return NULL;
+    }
+
+    if (!StringObject_AsWCHAR(serviceobj, 1, FALSE, &service, &slen)) {
+        goto done;
+    }
+
+    state = (sspi_server_state*)malloc(sizeof(sspi_server_state));
+    if (state == NULL) {
+        goto memoryerror;
+    }
+
+    pyctx = PyCObject_FromVoidPtr(state, &destroy_sspi_server);
+    if (pyctx == NULL) {
+        free(state);
+        goto done;
+    }
+
+    result = auth_sspi_server_init(service, state);
+    if (result == AUTH_GSS_ERROR) {
+        Py_DECREF(pyctx);
+        goto done;
+    }
+
+    resultobj =  Py_BuildValue("(iN)", result, pyctx);
+    goto done;
+
+memoryerror:
+    PyErr_SetNone(PyExc_MemoryError);
+
+done:
+    free(service);
+    return resultobj;
+}
+
+PyDoc_STRVAR(sspi_server_step_doc,
+"authGSSServerStep(context, challenge)\n"
+"\n"
+"Executes a single Kerberos SSPI server step using the supplied client "
+"data.\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"  - `challenge`: A string containing the base64 encoded client data.\n"
+"\n"
+":Returns: :data:`AUTH_GSS_CONTINUE` or :data:`AUTH_GSS_COMPLETE`");
+
+static PyObject*
+sspi_server_step(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+    SEC_CHAR* challenge = NULL;
+    INT result = 0;
+
+    if (!PyArg_ParseTuple(args, "Os", &pyctx, &challenge)) {
+        return NULL;
+    }
+
+    if (_string_too_long("challenge", strlen(challenge))) {
+        return NULL;
+    }
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    result = auth_sspi_server_step(state, challenge);
+    if (result == AUTH_GSS_ERROR) {
+        return NULL;
+    }
+
+    return Py_BuildValue("i", result);
+}
+
+PyDoc_STRVAR(sspi_server_response_doc,
+"authGSSServerResponse(context)\n"
+"\n"
+"Get the response to the last successful server operation.\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: A base64 encoded string to return to the client.");
+
+static PyObject*
+sspi_server_response(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+
+    if (!PyArg_ParseTuple(args, "O", &pyctx)) {
+        return NULL;
+    }
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    return Py_BuildValue("s", state->response);
+}
+
+PyDoc_STRVAR(sspi_server_username_doc,
+"authGSSServerUserName(context)\n"
+"\n"
+"Get the user name of the authenticated principal. Will only succeed after\n"
+"authentication is complete.\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: A string containing the username.");
+
+static PyObject*
+sspi_server_username(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+
+    if (!PyArg_ParseTuple(args, "O", &pyctx)) {
+        return NULL;
+    }
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    return Py_BuildValue("s", state->username);
+}
+
+PyDoc_STRVAR(sspi_server_targetname_doc,
+"authGSSServerTargetName(context)\n"
+"\n"
+"Get the target name if the server did not supply its own credentials. Will only succeed after\n"
+"authentication is complete.\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: A string containing the target name.");
+
+static PyObject*
+sspi_server_targetname(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+
+    if (!PyArg_ParseTuple(args, "O", &pyctx)) {
+        return NULL;
+    }
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    return Py_BuildValue("s", state->targetname);
+}
+
+
+PyDoc_STRVAR(sspi_server_clean_doc,
+"authGSSServerClean(context)\n"
+"\n"
+"Destroys the context. This function is provided for API compatibility with\n"
+"pykerberos but does nothing. The context object destroys itself when it\n"
+"is reclaimed.\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: :data:`AUTH_GSS_COMPLETE`");
+
+static PyObject*
+sspi_server_clean(PyObject* self, PyObject* args) {
+    /* Do nothing. For compatibility with pykerberos only. */
+    return Py_BuildValue("i", AUTH_GSS_COMPLETE);
+}
+
+
 static PyMethodDef WinKerberosClientMethods[] = {
     {"authGSSClientInit", (PyCFunction)sspi_client_init,
      METH_VARARGS | METH_KEYWORDS, sspi_client_init_doc},
@@ -708,6 +957,19 @@ static PyMethodDef WinKerberosClientMethods[] = {
      METH_VARARGS, sspi_client_unwrap_doc},
     {"authGSSClientWrap", sspi_client_wrap,
      METH_VARARGS, sspi_client_wrap_doc},
+    // Server Methods
+    {"authGSSServerInit", (PyCFunction)sspi_server_init,
+     METH_VARARGS | METH_KEYWORDS, sspi_server_init_doc},
+    {"authGSSServerClean", sspi_server_clean,
+     METH_VARARGS, sspi_server_clean_doc},
+    {"authGSSServerStep", sspi_server_step,
+     METH_VARARGS, sspi_server_step_doc},
+    {"authGSSServerResponse", sspi_server_response,
+     METH_VARARGS, sspi_server_response_doc},
+    {"authGSSServerUserName", sspi_server_username,
+     METH_VARARGS, sspi_server_username_doc},
+    {"authGSSServerTargetName", sspi_server_targetname,
+     METH_VARARGS, sspi_server_targetname_doc},
     {NULL, NULL, 0, NULL}
 };
 

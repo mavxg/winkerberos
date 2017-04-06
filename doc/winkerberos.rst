@@ -12,6 +12,10 @@
    .. autofunction:: authGSSClientUnwrap
    .. autofunction:: authGSSClientWrap
    .. autofunction:: authGSSClientClean
+   .. autofunction:: authGSSServerInit
+   .. autofunction:: authGSSServerStep
+   .. autofunction:: authGSSServerResponse
+   .. autofunction:: authGSSServerClean
    .. autoexception:: KrbError
    .. autoexception:: GSSError
    .. data:: AUTH_GSS_COMPLETE

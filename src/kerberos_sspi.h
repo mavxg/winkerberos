@@ -1,5 +1,6 @@
 /*
  * Copyright 2016 MongoDB, Inc.
+ * Copyright 2017 Benjamin Norrington.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,6 +40,22 @@ typedef struct {
     ULONG qop;
 } sspi_client_state;
 
+typedef struct {
+    CredHandle cred;
+    CtxtHandle ctx;
+    WCHAR* spn;
+    SEC_CHAR* response;
+    SEC_CHAR* username;
+    SEC_CHAR* targetname;
+    ULONG flags;
+    UCHAR haveCred;
+    UCHAR haveCtx;
+    TimeStamp cred_expiry;
+    TimeStamp ctx_expiry;
+    ULONG ctx_attr;
+    BOOL authenticated;
+} sspi_server_state;
+
 VOID set_gsserror(DWORD errCode, const SEC_CHAR* msg);
 VOID destroy_sspi_client_state(sspi_client_state* state);
 INT auth_sspi_client_init(WCHAR* service,
@@ -58,3 +75,7 @@ INT auth_sspi_client_wrap(sspi_client_state* state,
                           SEC_CHAR* user,
                           ULONG ulen,
                           INT protect);
+VOID destroy_sspi_server_state(sspi_server_state* state);
+INT auth_sspi_server_init(WCHAR* service, sspi_server_state* state);
+INT auth_sspi_server_step(sspi_server_state* state, SEC_CHAR* challenge);
+INT auth_sspi_server_clean(sspi_server_state* state);
