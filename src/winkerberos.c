@@ -940,6 +940,78 @@ sspi_server_clean(PyObject* self, PyObject* args) {
 }
 
 
+//Helpers to figure stuff out
+
+PyDoc_STRVAR(sspi_server_impersonate_doc,
+"authGSSServerImpersonate(context)\n"
+"\n"
+"Impersonate client credentials\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: :data:");
+
+static PyObject*
+sspi_server_impersonate(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+    INT result = 0;
+
+    if (!PyArg_ParseTuple(args, "O", &pyctx)) {
+        return NULL;
+    }
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    result = auth_sspi_server_impersonate(state);
+    return Py_BuildValue("i", result);
+}
+
+PyDoc_STRVAR(sspi_server_revert_doc,
+"authGSSServerRevert(context)\n"
+"\n"
+"Revert client credentials (to server creds)\n"
+"\n"
+":Parameters:\n"
+"  - `context`: The context object returned by :func:`authGSSServerInit`.\n"
+"\n"
+":Returns: :data:");
+
+static PyObject*
+sspi_server_revert(PyObject* self, PyObject* args) {
+    sspi_server_state* state;
+    PyObject* pyctx;
+    INT result = 0;
+
+    if (!PyArg_ParseTuple(args, "O", &pyctx)) {
+        return NULL;
+    }
+
+
+    if (!PyCObject_Check(pyctx)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a context object");
+        return NULL;
+    }
+
+    state = (sspi_server_state*)PyCObject_AsVoidPtr(pyctx);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    result = auth_sspi_server_revert(state);
+    return Py_BuildValue("i", result);
+}
+
+
 static PyMethodDef WinKerberosClientMethods[] = {
     {"authGSSClientInit", (PyCFunction)sspi_client_init,
      METH_VARARGS | METH_KEYWORDS, sspi_client_init_doc},
@@ -970,6 +1042,10 @@ static PyMethodDef WinKerberosClientMethods[] = {
      METH_VARARGS, sspi_server_username_doc},
     {"authGSSServerTargetName", sspi_server_targetname,
      METH_VARARGS, sspi_server_targetname_doc},
+    {"authGSSServerImpersonate", sspi_server_impersonate,
+     METH_VARARGS, sspi_server_impersonate_doc},
+    {"authGSSServerRevert", sspi_server_revert,
+     METH_VARARGS, sspi_server_revert_doc},
     {NULL, NULL, 0, NULL}
 };
 

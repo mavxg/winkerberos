@@ -54,6 +54,7 @@ typedef struct {
     TimeStamp ctx_expiry;
     ULONG ctx_attr;
     BOOL authenticated;
+    ULONG max_token;
 } sspi_server_state;
 
 VOID set_gsserror(DWORD errCode, const SEC_CHAR* msg);
@@ -79,3 +80,5 @@ VOID destroy_sspi_server_state(sspi_server_state* state);
 INT auth_sspi_server_init(WCHAR* service, sspi_server_state* state);
 INT auth_sspi_server_step(sspi_server_state* state, SEC_CHAR* challenge);
 INT auth_sspi_server_clean(sspi_server_state* state);
+INT auth_sspi_server_impersonate(sspi_server_state* state);
+INT auth_sspi_server_revert(sspi_server_state* state);

@@ -16,6 +16,7 @@
  */
 
 #include "kerberos_sspi.h"
+#include <stdio.h>
 
 extern PyObject* GSSError;
 
@@ -569,8 +570,9 @@ destroy_sspi_server_state(sspi_server_state* state) {
 
 INT
 auth_sspi_server_init(WCHAR* service, sspi_server_state* state) {
-    WCHAR *mechoid = GSS_MECH_OID_KRB5;
+    WCHAR *mechoid = GSS_MECH_OID_SPNEGO; //GSS_MECH_OID_KRB5;
     SECURITY_STATUS status;
+    PSecPkgInfoW pkgInfo;
 
     state->response = NULL;
     state->username = NULL;
@@ -578,6 +580,7 @@ auth_sspi_server_init(WCHAR* service, sspi_server_state* state) {
     state->flags = ASC_REQ_INTEGRITY |
                    ASC_REQ_SEQUENCE_DETECT |
                    ASC_REQ_REPLAY_DETECT |
+                   ASC_REQ_DELEGATE |
                    ASC_REQ_CONFIDENTIALITY;
     state->haveCred = 0;
     state->haveCtx = 0;
@@ -596,8 +599,20 @@ auth_sspi_server_init(WCHAR* service, sspi_server_state* state) {
         }
     }
 
+    status = QuerySecurityPackageInfoW (mechoid, &pkgInfo);
+
+    if (status < 0) 
+    {
+        set_gsserror(status, "QuerySecurityPackageInfo");
+        return AUTH_GSS_ERROR;
+    }
+
+    state->max_token = pkgInfo->cbMaxToken;
+
+    FreeContextBuffer(pkgInfo);
+
     status = AcquireCredentialsHandleW(/* Principal */
-                                       state->spn,
+                                       NULL, //state->spn,
                                        /* Security package name */
                                        mechoid,
                                        /* Credentials Use */
@@ -629,6 +644,7 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
     SecBufferDesc outbuf;
     SecBuffer outBufs[1];
     SECURITY_STATUS status = AUTH_GSS_CONTINUE;
+    SECURITY_STATUS ret_status;
     DWORD len;
 
     if (state->response != NULL) {
@@ -639,23 +655,26 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
     inbuf.ulVersion = SECBUFFER_VERSION;
     inbuf.cBuffers = 1;
     inbuf.pBuffers = inBufs;
-    inBufs[0].pvBuffer = NULL;
-    inBufs[0].cbBuffer = 0;
     inBufs[0].BufferType = SECBUFFER_TOKEN;
-    if (state->haveCtx) {
-        inBufs[0].pvBuffer = base64_decode(challenge, &len);
-        if (!inBufs[0].pvBuffer) {
-            return AUTH_GSS_ERROR;
-        }
-        inBufs[0].cbBuffer = len;
+    inBufs[0].pvBuffer = base64_decode(challenge, &len);
+    if (!inBufs[0].pvBuffer) {
+        return AUTH_GSS_ERROR;
     }
+    inBufs[0].cbBuffer = len;
+
 
     outbuf.ulVersion = SECBUFFER_VERSION;
     outbuf.cBuffers = 1;
     outbuf.pBuffers = outBufs;
-    outBufs[0].pvBuffer = NULL;
-    outBufs[0].cbBuffer = 0;
+    outBufs[0].pvBuffer = (SEC_CHAR*)malloc(sizeof(SEC_CHAR) * state->max_token);
+    outBufs[0].cbBuffer = state->max_token;
     outBufs[0].BufferType = SECBUFFER_TOKEN;
+
+    if (outBufs[0].pvBuffer == NULL) {
+        set_gsserror(status, "Failed to allocate memory for out buffer");
+        status = AUTH_GSS_ERROR;
+        goto done;
+    }
 
     Py_BEGIN_ALLOW_THREADS
     status = AcceptSecurityContext(/* CredHandle */
@@ -665,7 +684,7 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
                                    /* Challenge  */
                                    &inbuf, //pInput
                                    /* Flags */
-                                   ASC_REQ_ALLOCATE_MEMORY | state->flags,
+                                   ASC_REQ_DELEGATE | ASC_REQ_CONNECTION, //ASC_REQ_ALLOCATE_MEMORY is only for digest
                                    /* Target data representation TargetDataRep*/
                                    SECURITY_NETWORK_DREP,
                                    /* CtxtHandle (Set on first call) */
@@ -676,15 +695,34 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
                                    &state->ctx_attr, 
                                    /* Expiry */
                                    &state->ctx_expiry);
+
+    ret_status = status;
     Py_END_ALLOW_THREADS
-    if (status == SEC_I_COMPLETE_NEEDED || status == SEC_I_COMPLETE_AND_CONTINUE)  {
-        status = CompleteAuthToken(&state->ctx, &outbuf);
+    fprintf(stderr, "STATUS: %X\n", ret_status);
+    if (status == SEC_I_COMPLETE_NEEDED)  {
         state->haveCtx = 1;
+        status = CompleteAuthToken(&state->ctx, &outbuf);
+        if (status != SEC_E_OK) {
+            set_gsserror(status, "CompleteAuthToken");
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+        status = AUTH_GSS_COMPLETE;
+    } else if (status == SEC_I_COMPLETE_AND_CONTINUE) {
+        state->haveCtx = 1;
+        status = CompleteAuthToken(&state->ctx, &outbuf);
+        if (status != SEC_E_OK) {
+            set_gsserror(status, "CompleteAuthToken");
+            status = AUTH_GSS_ERROR;
+            goto done;
+        }
+        status = AUTH_GSS_CONTINUE;
     } else if (status == SEC_I_CONTINUE_NEEDED) {
         state->haveCtx = 1;
         status = AUTH_GSS_CONTINUE;
     } else if (status == SEC_E_OK) {
         state->haveCtx = 1;
+        status = AUTH_GSS_COMPLETE;
     } else {
         set_gsserror(status, "AcceptSecurityContext");
         status = AUTH_GSS_ERROR;
@@ -699,7 +737,7 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
             goto done;
         }
     }
-    if (status == SEC_E_OK) {
+    if (status == AUTH_GSS_COMPLETE) {
         SecPkgContext_NativeNamesW native_names;
         /* Get authenticated username. */
         SecPkgContext_NamesW names;
@@ -720,22 +758,38 @@ auth_sspi_server_step(sspi_server_state *state, SEC_CHAR* challenge) {
         status = QueryContextAttributesW(
             &state->ctx, SECPKG_ATTR_NATIVE_NAMES, &native_names);
         if (status != SEC_E_OK) {
-            set_gsserror(status, "QueryContextAttributesW");
+            set_gsserror(status, "QueryContextAttributesW SECPKG_ATTR_NATIVE_NAMES");
             status = AUTH_GSS_ERROR;
             goto done;
         }
         state->targetname = wide_to_utf8(native_names.sServerName);
         FreeContextBuffer(native_names.sClientName);
         FreeContextBuffer(native_names.sServerName);
-        status = AUTH_GSS_COMPLETE;
-        state->authenticated = TRUE;
     }
 done:
     if (inBufs[0].pvBuffer) {
         free(inBufs[0].pvBuffer);
     }
     if (outBufs[0].pvBuffer) {
-        FreeContextBuffer(outBufs[0].pvBuffer);
+        free(outBufs[0].pvBuffer);
     }
-    return status;
+    return ret_status;
+}
+
+
+INT auth_sspi_server_impersonate(sspi_server_state* state) {
+    SecPkgContext_AccessToken token;
+    SECURITY_STATUS status;
+    status = QueryContextAttributesW(
+            &state->ctx, SECPKG_ATTR_ACCESS_TOKEN, &token);
+    if (status == SEC_E_NO_IMPERSONATION) {
+        fprintf(stderr, "NO SEC_E_NO_IMPERSONATION\n");
+    } else {
+        fprintf(stderr, "Status %X\n", status);
+    }
+    return ImpersonateSecurityContext(&state->ctx);
+
+}
+INT auth_sspi_server_revert(sspi_server_state* state) {
+    return RevertSecurityContext(&state->ctx);
 }
